@@ -5,7 +5,7 @@ systemctl start docker
 systemctl enable docker
 usermod -aG docker ubuntu
 
-# MySQL 5.7 컨테이너 (메모리 최적화)
+# MySQL 5.7 컨테이너 (메모리 최적화 및 UTF8MB4 설정)
 docker run -d --name mysql \
   --restart unless-stopped \
   -m 250m \
@@ -14,6 +14,8 @@ docker run -d --name mysql \
   -e MYSQL_ROOT_HOST=% \
   -p 3306:3306 \
   mysql:5.7 \
+  --character-set-server=utf8mb4 \
+  --collation-server=utf8mb4_unicode_ci \
   --innodb-buffer-pool-size=32M \
   --innodb-log-file-size=16M \
   --max-connections=30 \
