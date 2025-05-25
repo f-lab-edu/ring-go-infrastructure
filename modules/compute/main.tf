@@ -56,6 +56,14 @@ resource "aws_security_group" "app_server" {
   name_prefix = "${var.project_name}-${var.environment}-app-"
   vpc_id      = var.vpc_id
 
+  # HTTPS 접속 허용 (포트 443)
+  ingress {
+    from_port = 443
+    to_port   = 443
+    protocol  = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
   # HTTP 접속 허용 (포트 80)
   ingress {
     from_port = 80
@@ -117,9 +125,8 @@ resource "aws_instance" "app_server" {
     #!/bin/bash
     set -e  # 심각한 오류 발생 시에만 중단
 
-    # 로그 파일 생성 (디버깅용)
-    exec > >(tee /var/log/user-data.log)
-    exec 2>&1
+    # 로그 파일 생성 (디버깅용) - 수정된 부분
+    exec > /var/log/user-data.log 2>&1
 
     echo "=== User Data 스크립트 시작: $(date) ==="
 
@@ -130,6 +137,125 @@ resource "aws_instance" "app_server" {
     systemctl start docker
     systemctl enable docker
     usermod -a -G docker ec2-user
+
+    # Nginx 설치 (Amazon Linux 2용)
+    echo "Nginx 설치 중..."
+    amazon-linux-extras install nginx1 -y
+    systemctl start nginx
+    systemctl enable nginx
+
+    # Ring-Go용 Nginx 설정 파일 생성
+    cat > /etc/nginx/conf.d/ringgo.conf << 'NGINX_EOF'
+# HTTP to HTTPS redirect for all subdomains
+server {
+    listen 80;
+    server_name api.ring-go.kr docs.ring-go.kr www.ring-go.kr;
+    return 301 https://$server_name$request_uri;
+}
+
+# HTTPS API 서버 설정
+server {
+    listen 443 ssl;
+    server_name api.ring-go.kr;
+
+    # SSL 설정 (Let's Encrypt 인증서)
+    ssl_certificate /etc/letsencrypt/live/api.ring-go.kr/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/api.ring-go.kr/privkey.pem;
+
+    location / {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-Host $host;
+
+        proxy_connect_timeout 30s;
+        proxy_send_timeout 30s;
+        proxy_read_timeout 30s;
+    }
+}
+
+# HTTPS Swagger 문서 서버 설정
+server {
+    listen 443 ssl;
+    server_name docs.ring-go.kr;
+
+    # SSL 설정 (Let's Encrypt 인증서)
+    ssl_certificate /etc/letsencrypt/live/api.ring-go.kr/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/api.ring-go.kr/privkey.pem;
+
+    # 메인 페이지 접속 시 Swagger로 리다이렉트
+    location = / {
+        return 301 https://$server_name/swagger-ui/index.html;
+    }
+
+    location / {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-Host $host;
+
+        proxy_buffering off;
+        proxy_request_buffering off;
+    }
+}
+
+# HTTPS 메인 웹사이트 설정 (향후 프론트엔드용)
+server {
+    listen 443 ssl;
+    server_name www.ring-go.kr;
+
+    # SSL 설정 (Let's Encrypt 인증서)
+    ssl_certificate /etc/letsencrypt/live/api.ring-go.kr/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/api.ring-go.kr/privkey.pem;
+
+    # 임시로 API 문서로 리다이렉트 (나중에 프론트엔드로 변경)
+    location / {
+        return 301 https://docs.ring-go.kr;
+    }
+}
+NGINX_EOF
+
+    # Let's Encrypt 설치 및 SSL 인증서 발급
+    echo "Let's Encrypt 설치 중..."
+    yum install -y certbot python3-certbot-nginx
+
+    # 임시로 기본 HTTP 설정 사용 (인증서 발급용)
+    cat > /etc/nginx/conf.d/temp.conf << 'TEMP_EOF'
+server {
+    listen 80;
+    server_name api.ring-go.kr docs.ring-go.kr www.ring-go.kr;
+
+    location /.well-known/acme-challenge/ {
+        root /var/www/html;
+    }
+
+    location / {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-Host $host;
+    }
+}
+TEMP_EOF
+
+    # Nginx 재시작
+    systemctl reload nginx
+
+    # Let's Encrypt 인증서 발급 (잠시 대기)
+    sleep 60
+    echo "SSL 인증서 발급 시도..."
+    certbot --nginx -d api.ring-go.kr -d docs.ring-go.kr -d www.ring-go.kr --non-interactive --agree-tos --email wjsgmlwls97@gmail.com --redirect
+
+    # Nginx 설정 테스트 및 재시작
+    nginx -t && systemctl reload nginx
+
+    echo "Nginx 설정 완료: $(date)"
 
     echo "Docker 설치 완료: $(date)"
 

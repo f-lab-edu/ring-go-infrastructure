@@ -142,7 +142,7 @@ resource "oci_core_instance" "database_server" {
   }
 
   metadata = {
-    ssh_authorized_keys = file("D:/dev/oci_ssh_key.pub")
+    ssh_authorized_keys = file("D:/dev/oci_ringgo_public_key.pub")
     user_data = base64encode(templatefile("${path.module}/database_only.sh", {
       mysql_password = var.mysql_root_password
     }))

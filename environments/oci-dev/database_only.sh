@@ -21,9 +21,9 @@ docker run -d --name mysql \
   --max-connections=30 \
   --skip-performance-schema
 
-# Redis 컨테이너 (메모리 제한)
+# Redis 컨테이너 (외부 접속 허용)
 docker run -d --name redis \
   --restart unless-stopped \
   -m 100m \
   -p 6379:6379 \
-  redis:latest --maxmemory 80mb --maxmemory-policy allkeys-lru
+  redis:latest redis-server --bind 0.0.0.0 --protected-mode no --maxmemory 80mb --maxmemory-policy allkeys-lru
