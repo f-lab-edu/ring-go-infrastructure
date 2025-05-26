@@ -123,235 +123,347 @@ resource "aws_instance" "app_server" {
 
   user_data = <<-EOF
     #!/bin/bash
-    set -e  # 심각한 오류 발생 시에만 중단
+      # 로그 파일 생성 (디버깅용)
+      exec > /var/log/user-data.log 2>&1
 
-    # 로그 파일 생성 (디버깅용) - 수정된 부분
-    exec > /var/log/user-data.log 2>&1
+      echo "=== User Data 스크립트 시작: $(date) ==="
 
-    echo "=== User Data 스크립트 시작: $(date) ==="
+      # 스왑 파일 생성 (메모리 부족 해결)
+      echo "스왑 파일 생성 중..."
+      dd if=/dev/zero of=/swapfile bs=1M count=1024
+      chmod 600 /swapfile
+      mkswap /swapfile
+      swapon /swapfile
+      echo '/swapfile swap swap defaults 0 0' >> /etc/fstab
+      echo "✅ 스왑 파일 생성 완료"
 
-    # 기본 패키지 설치
-    echo "패키지 업데이트 및 설치 중..."
-    yum update -y
-    yum install -y docker aws-cli telnet
-    systemctl start docker
-    systemctl enable docker
-    usermod -a -G docker ec2-user
+      # 기본 패키지 설치
+      echo "패키지 업데이트 및 설치 중..."
+      yum update -y
+      yum install -y docker aws-cli telnet
+      systemctl start docker
+      systemctl enable docker
+      usermod -a -G docker ec2-user
 
-    # Nginx 설치 (Amazon Linux 2용)
-    echo "Nginx 설치 중..."
-    amazon-linux-extras install nginx1 -y
-    systemctl start nginx
-    systemctl enable nginx
+      # Nginx 설치
+      echo "Nginx 설치 중..."
+      NGINX_INSTALLED=false
+      RETRY_COUNT=0
+      MAX_RETRIES=3
 
-    # Ring-Go용 Nginx 설정 파일 생성
-    cat > /etc/nginx/conf.d/ringgo.conf << 'NGINX_EOF'
-# HTTP to HTTPS redirect for all subdomains
-server {
-    listen 80;
-    server_name api.ring-go.kr docs.ring-go.kr www.ring-go.kr;
-    return 301 https://$server_name$request_uri;
-}
+      while [ $RETRY_COUNT -lt $MAX_RETRIES ] && [ "$NGINX_INSTALLED" = false ]; do
+          RETRY_COUNT=$((RETRY_COUNT + 1))
+          echo "Nginx 설치 시도 $RETRY_COUNT/$MAX_RETRIES..."
 
-# HTTPS API 서버 설정
-server {
-    listen 443 ssl;
-    server_name api.ring-go.kr;
+          if amazon-linux-extras install nginx1 -y; then
+              echo "✅ Nginx 설치 성공"
+              NGINX_INSTALLED=true
+          else
+              echo "❌ Nginx 설치 실패 (시도 $RETRY_COUNT/$MAX_RETRIES)"
+              if [ $RETRY_COUNT -lt $MAX_RETRIES ]; then
+                  echo "30초 후 재시도..."
+                  sleep 30
+              fi
+          fi
+      done
 
-    # SSL 설정 (Let's Encrypt 인증서)
-    ssl_certificate /etc/letsencrypt/live/api.ring-go.kr/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/api.ring-go.kr/privkey.pem;
+      if [ "$NGINX_INSTALLED" = true ]; then
+          systemctl start nginx
+          systemctl enable nginx
+          echo "✅ Nginx 서비스 시작 완료"
+      else
+          echo "❌ Nginx 설치 최종 실패 - 스크립트 계속 진행"
+      fi
 
-    location / {
-        proxy_pass http://127.0.0.1:8080;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_set_header X-Forwarded-Host $host;
+      # Docker 설치 완료
+      echo "Docker 설치 완료: $(date)"
 
-        proxy_connect_timeout 30s;
-        proxy_send_timeout 30s;
-        proxy_read_timeout 30s;
-    }
-}
+      # Oracle Cloud DB 연결 테스트
+      echo "Oracle Cloud DB 연결 테스트 시작 (${database_server_ip}:3306)..."
+      DB_REACHABLE=false
 
-# HTTPS Swagger 문서 서버 설정
-server {
-    listen 443 ssl;
-    server_name docs.ring-go.kr;
+      if timeout 30 bash -c "</dev/tcp/${database_server_ip}/3306" 2>/dev/null; then
+          echo "✅ Oracle Cloud DB 연결 성공"
+          DB_REACHABLE=true
+      else
+          echo "❌ Oracle Cloud DB 연결 실패 (30초 타임아웃)"
+          DB_REACHABLE=false
+      fi
 
-    # SSL 설정 (Let's Encrypt 인증서)
-    ssl_certificate /etc/letsencrypt/live/api.ring-go.kr/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/api.ring-go.kr/privkey.pem;
+      # Parameter Store에서 값 가져오기
+      export AWS_DEFAULT_REGION=${aws_region}
+      echo "Parameter Store에서 설정값 가져오는 중..."
 
-    # 메인 페이지 접속 시 Swagger로 리다이렉트
-    location = / {
-        return 301 https://$server_name/swagger-ui/index.html;
-    }
+      # 함수: Parameter Store에서 안전하게 값 가져오기
+      get_parameter() {
+          local param_name="$1"
+          local description="$2"
+          echo "$description 가져오는 중..."
+          local value=$(timeout 30 aws ssm get-parameter --name "$param_name" --with-decryption --query "Parameter.Value" --output text 2>/dev/null || echo "FAILED")
+          echo "$description: $([ "$value" != "FAILED" ] && echo "OK" || echo "FAILED")"
+          echo "$value"
+      }
 
-    location / {
-        proxy_pass http://127.0.0.1:8080;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_set_header X-Forwarded-Host $host;
+      MYSQL_PASSWORD=$(get_parameter "/ringgo/mysql/root-password" "MySQL 패스워드")
+      JWT_SECRET=$(get_parameter "/ringgo/jwt/secret" "JWT Secret")
+      KAKAO_CLIENT_ID=$(get_parameter "/ringgo/oauth/kakao/client-id" "카카오 Client ID")
+      KAKAO_CLIENT_SECRET=$(get_parameter "/ringgo/oauth/kakao/client-secret" "카카오 Client Secret")
+      NAVER_CLIENT_ID=$(get_parameter "/ringgo/oauth/naver/client-id" "네이버 Client ID")
+      NAVER_CLIENT_SECRET=$(get_parameter "/ringgo/oauth/naver/client-secret" "네이버 Client Secret")
+      GOOGLE_CLIENT_ID=$(get_parameter "/ringgo/oauth/google/client-id" "구글 Client ID")
+      GOOGLE_CLIENT_SECRET=$(get_parameter "/ringgo/oauth/google/client-secret" "구글 Client Secret")
 
-        proxy_buffering off;
-        proxy_request_buffering off;
-    }
-}
+      # 퍼블릭 IP 가져오기
+      echo "퍼블릭 IP 가져오는 중..."
+      PUBLIC_IP=$(timeout 10 curl -s http://169.254.169.254/latest/meta-data/public-ipv4 2>/dev/null || echo "UNKNOWN")
 
-# HTTPS 메인 웹사이트 설정 (향후 프론트엔드용)
-server {
-    listen 443 ssl;
-    server_name www.ring-go.kr;
+      echo "=== 설정 확인 ==="
+      echo "DB 연결 가능: $DB_REACHABLE"
+      echo "MySQL 패스워드: $([ "$MYSQL_PASSWORD" != "FAILED" ] && echo "OK" || echo "FAILED")"
+      echo "JWT Secret: $([ "$JWT_SECRET" != "FAILED" ] && echo "OK" || echo "FAILED")"
+      echo "Public IP: $PUBLIC_IP"
+      echo "Nginx 설치 상태: $NGINX_INSTALLED"
 
-    # SSL 설정 (Let's Encrypt 인증서)
-    ssl_certificate /etc/letsencrypt/live/api.ring-go.kr/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/api.ring-go.kr/privkey.pem;
+      # Spring Boot 컨테이너 실행
+      if [ "$DB_REACHABLE" = true ] && [ "$MYSQL_PASSWORD" != "FAILED" ] && [ "$JWT_SECRET" != "FAILED" ]; then
+          echo "✅ 필수 조건 충족 - Spring Boot 컨테이너 시작"
 
-    # 임시로 API 문서로 리다이렉트 (나중에 프론트엔드로 변경)
-    location / {
-        return 301 https://docs.ring-go.kr;
-    }
-}
-NGINX_EOF
+          # 기존 컨테이너 정리
+          if docker ps -aq -f name=ringgo | grep -q .; then
+              echo "기존 컨테이너 정리 중..."
+              docker stop ringgo 2>/dev/null || true
+              docker rm ringgo 2>/dev/null || true
+          fi
 
-    # Let's Encrypt 설치 및 SSL 인증서 발급
-    echo "Let's Encrypt 설치 중..."
-    yum install -y certbot python3-certbot-nginx
+          # 컨테이너 실행
+          if docker run -d --name ringgo \
+            --restart unless-stopped \
+            --memory=500m \
+            --cpus=0.8 \
+            -p 8080:8080 \
+            -e SPRING_PROFILES_ACTIVE=dev \
+            -e SPRING_DATASOURCE_URL=jdbc:mysql://${database_server_ip}:3306/ringgo \
+            -e SPRING_DATASOURCE_USERNAME=root \
+            -e SPRING_DATASOURCE_PASSWORD="$MYSQL_PASSWORD" \
+            -e SPRING_DATA_REDIS_HOST=${database_server_ip} \
+            -e SPRING_DATA_REDIS_PORT=6379 \
+            -e SPRING_KAFKA_BOOTSTRAP_SERVERS=localhost:9092 \
+            -e SPRING_KAFKA_CONSUMER_GROUP_ID=ringgo-group \
+            -e SERVER_BASE_URL=http://$PUBLIC_IP:8080 \
+            -e OAUTH_KAKAO_CLIENT_ID="$KAKAO_CLIENT_ID" \
+            -e OAUTH_KAKAO_CLIENT_SECRET="$KAKAO_CLIENT_SECRET" \
+            -e OAUTH_NAVER_CLIENT_ID="$NAVER_CLIENT_ID" \
+            -e OAUTH_NAVER_CLIENT_SECRET="$NAVER_CLIENT_SECRET" \
+            -e OAUTH_GOOGLE_CLIENT_ID="$GOOGLE_CLIENT_ID" \
+            -e OAUTH_GOOGLE_CLIENT_SECRET="$GOOGLE_CLIENT_SECRET" \
+            -e JWT_SECRET="$JWT_SECRET" \
+            h2jinee/ringgo:latest; then
 
-    # 임시로 기본 HTTP 설정 사용 (인증서 발급용)
-    cat > /etc/nginx/conf.d/temp.conf << 'TEMP_EOF'
-server {
-    listen 80;
-    server_name api.ring-go.kr docs.ring-go.kr www.ring-go.kr;
+              echo "✅ Spring Boot 컨테이너 시작 완료: $(date)"
 
-    location /.well-known/acme-challenge/ {
-        root /var/www/html;
-    }
+              # 컨테이너 상태 확인
+              sleep 10
+              if docker ps | grep ringgo > /dev/null; then
+                  echo "✅ 컨테이너 정상 실행 중"
+              else
+                  echo "❌ 컨테이너 실행 실패 - 로그 확인:"
+                  docker logs ringgo 2>/dev/null || echo "로그 조회 실패"
+              fi
+          else
+              echo "❌ Docker 컨테이너 시작 실패"
+          fi
+      fi
 
-    location / {
-        proxy_pass http://127.0.0.1:8080;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_set_header X-Forwarded-Host $host;
-    }
-}
-TEMP_EOF
+      # SSL 인증서 설치 (nginx가 설치된 경우에만)
+      if [ "$NGINX_INSTALLED" = true ]; then
+          echo "SSL 인증서 설치 시작..."
 
-    # Nginx 재시작
-    systemctl reload nginx
+          # EPEL 저장소 설치
+          if amazon-linux-extras install epel -y; then
+              echo "✅ EPEL 저장소 설치 성공"
 
-    # Let's Encrypt 인증서 발급 (잠시 대기)
-    sleep 60
-    echo "SSL 인증서 발급 시도..."
-    certbot --nginx -d api.ring-go.kr -d docs.ring-go.kr -d www.ring-go.kr --non-interactive --agree-tos --email wjsgmlwls97@gmail.com --redirect
+              # certbot 설치
+              if yum install -y certbot python2-certbot-nginx; then
+                  echo "✅ certbot 설치 성공"
 
-    # Nginx 설정 테스트 및 재시작
-    nginx -t && systemctl reload nginx
+                  # 기본 nginx 설정 생성 (SSL 인증서 발급용)
+                  cat > /etc/nginx/conf.d/temp.conf << 'TEMP_EOF'
+      server {
+          listen 80;
+          server_name api.ring-go.kr docs.ring-go.kr www.ring-go.kr;
 
-    echo "Nginx 설정 완료: $(date)"
+          location /.well-known/acme-challenge/ {
+              root /var/www/html;
+          }
 
-    echo "Docker 설치 완료: $(date)"
+          location / {
+              proxy_pass http://127.0.0.1:8080;
+              proxy_set_header Host $host;
+              proxy_set_header X-Real-IP $remote_addr;
+              proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+              proxy_set_header X-Forwarded-Proto $scheme;
+              proxy_set_header X-Forwarded-Host $host;
+          }
+      }
+      TEMP_EOF
 
-    # Oracle Cloud DB 연결 테스트 (30초 타임아웃)
-    echo "Oracle Cloud DB 연결 테스트 시작 (${var.database_server_ip}:3306)..."
-    DB_REACHABLE=false
+                  # nginx 재시작
+                  nginx -t && systemctl restart nginx
 
-    if timeout 30 bash -c "</dev/tcp/${var.database_server_ip}/3306" 2>/dev/null; then
-        echo "✅ Oracle Cloud DB 연결 성공"
-        DB_REACHABLE=true
-    else
-        echo "❌ Oracle Cloud DB 연결 실패 (30초 타임아웃)"
-        DB_REACHABLE=false
-    fi
+                  # 60초 대기 후 SSL 인증서 발급
+                  sleep 60
+                  mkdir -p /var/www/html
 
-    # Parameter Store에서 값 가져오기 (각각 30초 타임아웃)
-    export AWS_DEFAULT_REGION=${var.aws_region}
-    echo "Parameter Store에서 설정값 가져오는 중..."
+                  echo "SSL 인증서 발급 시도..."
+                  if certbot --nginx -d api.ring-go.kr -d docs.ring-go.kr -d www.ring-go.kr --non-interactive --agree-tos --email wjsgmlwls97@gmail.com --redirect; then
+                      echo "✅ SSL 인증서 발급 성공"
 
-    MYSQL_PASSWORD=""
-    JWT_SECRET=""
-    KAKAO_CLIENT_ID=""
-    KAKAO_CLIENT_SECRET=""
-    NAVER_CLIENT_ID=""
-    NAVER_CLIENT_SECRET=""
-    GOOGLE_CLIENT_ID=""
-    GOOGLE_CLIENT_SECRET=""
+                      # 도메인별 맞춤 설정 적용
+                      cat > /etc/nginx/conf.d/temp.conf << 'FINAL_EOF'
+      # API 서버
+      server {
+          listen 443 ssl;
+          server_name api.ring-go.kr;
 
-    # Parameter Store 접근 (타임아웃 포함)
-    echo "MySQL 패스워드 가져오는 중..."
-    MYSQL_PASSWORD=$(timeout 30 aws ssm get-parameter --name "/ringgo/mysql/root-password" --with-decryption --query "Parameter.Value" --output text 2>/dev/null || echo "FAILED")
+          ssl_certificate /etc/letsencrypt/live/api.ring-go.kr/fullchain.pem;
+          ssl_certificate_key /etc/letsencrypt/live/api.ring-go.kr/privkey.pem;
+          include /etc/letsencrypt/options-ssl-nginx.conf;
+          ssl_dhparam /etc/letsencrypt/ssl-dhparams.pem;
 
-    echo "JWT Secret 가져오는 중..."
-    JWT_SECRET=$(timeout 30 aws ssm get-parameter --name "/ringgo/jwt/secret" --with-decryption --query "Parameter.Value" --output text 2>/dev/null || echo "FAILED")
+          location / {
+              proxy_pass http://127.0.0.1:8080;
+              proxy_set_header Host $host;
+              proxy_set_header X-Real-IP $remote_addr;
+              proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+              proxy_set_header X-Forwarded-Proto $scheme;
+              proxy_set_header X-Forwarded-Host $host;
+          }
+      }
 
-    echo "OAuth 설정 가져오는 중..."
-    KAKAO_CLIENT_ID=$(timeout 30 aws ssm get-parameter --name "/ringgo/oauth/kakao/client-id" --with-decryption --query "Parameter.Value" --output text 2>/dev/null || echo "FAILED")
-    KAKAO_CLIENT_SECRET=$(timeout 30 aws ssm get-parameter --name "/ringgo/oauth/kakao/client-secret" --with-decryption --query "Parameter.Value" --output text 2>/dev/null || echo "FAILED")
-    NAVER_CLIENT_ID=$(timeout 30 aws ssm get-parameter --name "/ringgo/oauth/naver/client-id" --with-decryption --query "Parameter.Value" --output text 2>/dev/null || echo "FAILED")
-    NAVER_CLIENT_SECRET=$(timeout 30 aws ssm get-parameter --name "/ringgo/oauth/naver/client-secret" --with-decryption --query "Parameter.Value" --output text 2>/dev/null || echo "FAILED")
-    GOOGLE_CLIENT_ID=$(timeout 30 aws ssm get-parameter --name "/ringgo/oauth/google/client-id" --with-decryption --query "Parameter.Value" --output text 2>/dev/null || echo "FAILED")
-    GOOGLE_CLIENT_SECRET=$(timeout 30 aws ssm get-parameter --name "/ringgo/oauth/google/client-secret" --with-decryption --query "Parameter.Value" --output text 2>/dev/null || echo "FAILED")
+      # Swagger 문서 서버
+      server {
+          listen 443 ssl;
+          server_name docs.ring-go.kr;
+          ssl_certificate /etc/letsencrypt/live/api.ring-go.kr/fullchain.pem;
+          ssl_certificate_key /etc/letsencrypt/live/api.ring-go.kr/privkey.pem;
+          include /etc/letsencrypt/options-ssl-nginx.conf;
+          ssl_dhparam /etc/letsencrypt/ssl-dhparams.pem;
+          # /api/ → /api 리다이렉트
+          location = /api/ {
+              return 301 https://$server_name/api;
+          }
+          # /api 메인 경로 - Swagger UI 제공
+          location = /api {
+              proxy_pass http://127.0.0.1:8080/swagger-ui/index.html;
+              proxy_set_header Host $host;
+              proxy_set_header X-Real-IP $remote_addr;
+              proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+              proxy_set_header X-Forwarded-Proto $scheme;
+              proxy_set_header X-Forwarded-Host $host;
+          }
+          # Swagger UI 리소스들이 /api/ 하위에서 요청될 때 처리
+          location ~ ^/api/(.+)$ {
+              proxy_pass http://127.0.0.1:8080/swagger-ui/$1;
+              proxy_set_header Host $host;
+              proxy_set_header X-Real-IP $remote_addr;
+              proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+              proxy_set_header X-Forwarded-Proto $scheme;
+              proxy_set_header X-Forwarded-Host $host;
+          }
+          # Swagger UI 직접 경로
+          location /swagger-ui/ {
+              proxy_pass http://127.0.0.1:8080/swagger-ui/;
+              proxy_set_header Host $host;
+              proxy_set_header X-Real-IP $remote_addr;
+              proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+              proxy_set_header X-Forwarded-Proto $scheme;
+              proxy_set_header X-Forwarded-Host $host;
+          }
+          # 웹 리소스들
+          location /webjars/ {
+              proxy_pass http://127.0.0.1:8080/webjars/;
+              proxy_set_header Host $host;
+              proxy_set_header X-Real-IP $remote_addr;
+              proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+              proxy_set_header X-Forwarded-Proto $scheme;
+              proxy_set_header X-Forwarded-Host $host;
+          }
+          # API 스펙 JSON
+          location /v3/ {
+              proxy_pass http://127.0.0.1:8080/v3/;
+              proxy_set_header Host $host;
+              proxy_set_header X-Real-IP $remote_addr;
+              proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+              proxy_set_header X-Forwarded-Proto $scheme;
+              proxy_set_header X-Forwarded-Host $host;
+          }
+          # 루트 경로
+          location = / {
+              return 200 "Ring-Go Documentation\\n\\nAPI Documentation: /api";
+              add_header Content-Type text/plain;
+          }
+          # 기타 모든 요청
+          location / {
+              proxy_pass http://127.0.0.1:8080;
+              proxy_set_header Host $host;
+              proxy_set_header X-Real-IP $remote_addr;
+              proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+              proxy_set_header X-Forwarded-Proto $scheme;
+              proxy_set_header X-Forwarded-Host $host;
+          }
+      }
 
-    # 퍼블릭 IP 가져오기 (10초 타임아웃)
-    echo "퍼블릭 IP 가져오는 중..."
-    PUBLIC_IP=$(timeout 10 curl -s http://169.254.169.254/latest/meta-data/public-ipv4 2>/dev/null || echo "UNKNOWN")
+      # 메인 웹사이트
+      server {
+          listen 443 ssl;
+          server_name www.ring-go.kr;
 
-    echo "=== 설정 확인 ==="
-    echo "DB 연결 가능: $DB_REACHABLE"
-    echo "MySQL 패스워드: $([ "$MYSQL_PASSWORD" != "FAILED" ] && echo "OK" || echo "FAILED")"
-    echo "JWT Secret: $([ "$JWT_SECRET" != "FAILED" ] && echo "OK" || echo "FAILED")"
-    echo "Public IP: $PUBLIC_IP"
+          ssl_certificate /etc/letsencrypt/live/api.ring-go.kr/fullchain.pem;
+          ssl_certificate_key /etc/letsencrypt/live/api.ring-go.kr/privkey.pem;
+          include /etc/letsencrypt/options-ssl-nginx.conf;
+          ssl_dhparam /etc/letsencrypt/ssl-dhparams.pem;
 
-    # Spring Boot 컨테이너 실행 (조건부)
-    if [ "$DB_REACHABLE" = true ] && [ "$MYSQL_PASSWORD" != "FAILED" ] && [ "$JWT_SECRET" != "FAILED" ]; then
-        echo "✅ 모든 조건 충족 - Spring Boot 컨테이너 시작"
+          location / {
+              return 301 https://docs.ring-go.kr;
+          }
+      }
 
-        docker run -d --name ringgo \
-          --restart unless-stopped \
-          --memory=400m \
-          --cpus=0.8 \
-          -p 8080:8080 \
-          -e SPRING_PROFILES_ACTIVE=dev \
-          -e SPRING_DATASOURCE_URL=jdbc:mysql://${var.database_server_ip}:3306/ringgo \
-          -e SPRING_DATASOURCE_USERNAME=root \
-          -e SPRING_DATASOURCE_PASSWORD="$MYSQL_PASSWORD" \
-          -e SPRING_DATA_REDIS_HOST=${var.database_server_ip} \
-          -e SPRING_DATA_REDIS_PORT=6379 \
-          -e SPRING_KAFKA_BOOTSTRAP_SERVERS=localhost:9092 \
-          -e SPRING_KAFKA_CONSUMER_GROUP_ID=ringgo-group \
-          -e SERVER_BASE_URL=http://$PUBLIC_IP:8080 \
-          -e OAUTH_KAKAO_CLIENT_ID="$KAKAO_CLIENT_ID" \
-          -e OAUTH_KAKAO_CLIENT_SECRET="$KAKAO_CLIENT_SECRET" \
-          -e OAUTH_NAVER_CLIENT_ID="$NAVER_CLIENT_ID" \
-          -e OAUTH_NAVER_CLIENT_SECRET="$NAVER_CLIENT_SECRET" \
-          -e OAUTH_GOOGLE_CLIENT_ID="$GOOGLE_CLIENT_ID" \
-          -e OAUTH_GOOGLE_CLIENT_SECRET="$GOOGLE_CLIENT_SECRET" \
-          -e JWT_SECRET="$JWT_SECRET" \
-          h2jinee/ringgo:latest
+      # HTTP to HTTPS 리다이렉트
+      server {
+          if ($host = www.ring-go.kr) {
+              return 301 https://$host$request_uri;
+          }
+          if ($host = docs.ring-go.kr) {
+              return 301 https://$host$request_uri;
+          }
+          if ($host = api.ring-go.kr) {
+              return 301 https://$host$request_uri;
+          }
+          listen 80;
+          server_name api.ring-go.kr docs.ring-go.kr www.ring-go.kr;
+          return 404;
+      }
+      FINAL_EOF
 
-        echo "✅ Spring Boot 컨테이너 시작 완료: $(date)"
+                      # 설정 재로드
+                      nginx -t && systemctl reload nginx
+                      echo "✅ 도메인별 설정 완료"
+                  else
+                      echo "❌ SSL 인증서 발급 실패"
+                  fi
+              else
+                  echo "❌ certbot 설치 실패"
+              fi
+          else
+              echo "❌ EPEL 저장소 설치 실패"
+          fi
+      else
+          echo "⚠️ nginx 미설치로 인해 SSL 설정 스킵"
+      fi
 
-        # 컨테이너 상태 확인
-        sleep 10
-        docker ps | grep ringgo && echo "✅ 컨테이너 정상 실행 중" || echo "❌ 컨테이너 실행 실패"
-
-    else
-        echo "❌ 조건 미충족 - Spring Boot 시작하지 않음"
-        echo "   - DB 연결: $DB_REACHABLE"
-        echo "   - MySQL PW: $([ "$MYSQL_PASSWORD" != "FAILED" ] && echo "OK" || echo "FAILED")"
-        echo "   - JWT Secret: $([ "$JWT_SECRET" != "FAILED" ] && echo "OK" || echo "FAILED")"
-        echo "⚠️  SSH 접속은 여전히 가능합니다."
-    fi
-
-    echo "=== User Data 스크립트 완료: $(date) ==="
-    echo "로그 파일 위치: /var/log/user-data.log"
+      echo "=== User Data 스크립트 완료: $(date) ==="
+      echo "로그 파일 위치: /var/log/user-data.log"
+      echo "🚀 서버 준비 완료!"
   EOF
 
   tags = {
