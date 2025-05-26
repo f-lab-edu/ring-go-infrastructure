@@ -179,10 +179,10 @@ resource "aws_instance" "app_server" {
       echo "Docker 설치 완료: $(date)"
 
       # Oracle Cloud DB 연결 테스트
-      echo "Oracle Cloud DB 연결 테스트 시작 (${database_server_ip}:3306)..."
+      echo "Oracle Cloud DB 연결 테스트 시작 (${var.database_server_ip}:3306)..."
       DB_REACHABLE=false
 
-      if timeout 30 bash -c "</dev/tcp/${database_server_ip}/3306" 2>/dev/null; then
+      if timeout 30 bash -c "</dev/tcp/${var.database_server_ip}/3306" 2>/dev/null; then
           echo "✅ Oracle Cloud DB 연결 성공"
           DB_REACHABLE=true
       else
@@ -191,7 +191,7 @@ resource "aws_instance" "app_server" {
       fi
 
       # Parameter Store에서 값 가져오기
-      export AWS_DEFAULT_REGION=${aws_region}
+      export AWS_DEFAULT_REGION=${var.aws_region}
       echo "Parameter Store에서 설정값 가져오는 중..."
 
       # 함수: Parameter Store에서 안전하게 값 가져오기
@@ -242,10 +242,10 @@ resource "aws_instance" "app_server" {
             --cpus=0.8 \
             -p 8080:8080 \
             -e SPRING_PROFILES_ACTIVE=dev \
-            -e SPRING_DATASOURCE_URL=jdbc:mysql://${database_server_ip}:3306/ringgo \
+            -e SPRING_DATASOURCE_URL=jdbc:mysql://${var.database_server_ip}:3306/ringgo \
             -e SPRING_DATASOURCE_USERNAME=root \
             -e SPRING_DATASOURCE_PASSWORD="$MYSQL_PASSWORD" \
-            -e SPRING_DATA_REDIS_HOST=${database_server_ip} \
+            -e SPRING_DATA_REDIS_HOST=${var.database_server_ip} \
             -e SPRING_DATA_REDIS_PORT=6379 \
             -e SPRING_KAFKA_BOOTSTRAP_SERVERS=localhost:9092 \
             -e SPRING_KAFKA_CONSUMER_GROUP_ID=ringgo-group \
