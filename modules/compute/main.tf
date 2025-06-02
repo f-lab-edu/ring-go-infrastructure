@@ -238,7 +238,7 @@ resource "aws_instance" "app_server" {
             -e SPRING_DATA_REDIS_PORT=6379 \
             -e SPRING_KAFKA_BOOTSTRAP_SERVERS=localhost:9092 \
             -e SPRING_KAFKA_CONSUMER_GROUP_ID=ringgo-group \
-            -e SERVER_BASE_URL=https://dev.ring-go.kr \
+            -e SERVER_BASE_URL=https://api-dev.ring-go.kr \
             -e OAUTH_KAKAO_CLIENT_ID="$KAKAO_CLIENT_ID" \
             -e OAUTH_KAKAO_CLIENT_SECRET="$KAKAO_CLIENT_SECRET" \
             -e OAUTH_NAVER_CLIENT_ID="$NAVER_CLIENT_ID" \
@@ -279,7 +279,7 @@ resource "aws_instance" "app_server" {
                   cat > /etc/nginx/conf.d/temp.conf << 'TEMP_EOF'
       server {
           listen 80;
-          server_name dev.ring-go.kr www.ring-go.kr ring-go.kr;
+          server_name api-dev.ring-go.kr;
 
           location /.well-known/acme-challenge/ {
               root /var/www/html;
@@ -304,18 +304,18 @@ resource "aws_instance" "app_server" {
                   mkdir -p /var/www/html
 
                   echo "SSL 인증서 발급 시도..."
-                  if certbot --nginx -d dev.ring-go.kr -d www.ring-go.kr -d ring-go.kr --non-interactive --agree-tos --email wjsgmlwls97@gmail.com --redirect; then
+                  if certbot --nginx -d api-dev.ring-go.kr --non-interactive --agree-tos --email wjsgmlwls97@gmail.com --redirect; then
                       echo "✅ SSL 인증서 발급 성공"
 
-                      # 심플한 개발 서버 설정 적용
+                      # API 개발 서버 설정 적용
                       cat > /etc/nginx/conf.d/temp.conf << 'FINAL_EOF'
-      # 개발 서버 (API + Swagger 통합)
+      # API 개발 서버
       server {
           listen 443 ssl;
-          server_name dev.ring-go.kr;
+          server_name api-dev.ring-go.kr;
 
-          ssl_certificate /etc/letsencrypt/live/dev.ring-go.kr/fullchain.pem;
-          ssl_certificate_key /etc/letsencrypt/live/dev.ring-go.kr/privkey.pem;
+          ssl_certificate /etc/letsencrypt/live/api-dev.ring-go.kr/fullchain.pem;
+          ssl_certificate_key /etc/letsencrypt/live/api-dev.ring-go.kr/privkey.pem;
           include /etc/letsencrypt/options-ssl-nginx.conf;
           ssl_dhparam /etc/letsencrypt/ssl-dhparams.pem;
 
@@ -347,25 +347,10 @@ resource "aws_instance" "app_server" {
           }
       }
 
-      # 메인 도메인은 개발 서버로 리다이렉트
-      server {
-          listen 443 ssl;
-          server_name www.ring-go.kr ring-go.kr;
-
-          ssl_certificate /etc/letsencrypt/live/dev.ring-go.kr/fullchain.pem;
-          ssl_certificate_key /etc/letsencrypt/live/dev.ring-go.kr/privkey.pem;
-          include /etc/letsencrypt/options-ssl-nginx.conf;
-          ssl_dhparam /etc/letsencrypt/ssl-dhparams.pem;
-
-          location / {
-              return 301 https://dev.ring-go.kr$request_uri;
-          }
-      }
-
       # HTTP to HTTPS 리다이렉트
       server {
           listen 80;
-          server_name dev.ring-go.kr www.ring-go.kr ring-go.kr;
+          server_name api-dev.ring-go.kr;
           
           location /.well-known/acme-challenge/ {
               root /var/www/html;
