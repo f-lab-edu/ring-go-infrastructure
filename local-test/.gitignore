@@ -1,0 +1,10 @@
+# Docker volumes
+mysql-data/
+redis-data/
+
+# Logs
+*.log
+
+# Temporary files
+*.tmp
+*.swp

@@ -72,14 +72,6 @@ resource "aws_security_group" "app_server" {
     cidr_blocks = ["0.0.0.0/0"]
   }
 
-  # Spring Boot 포트 (8080)
-  ingress {
-    from_port = 8080
-    to_port   = 8080
-    protocol  = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
   # SSH 접속 허용 (포트 22)
   ingress {
     from_port = 22
@@ -249,7 +241,7 @@ resource "aws_instance" "app_server" {
             -e SPRING_DATA_REDIS_PORT=6379 \
             -e SPRING_KAFKA_BOOTSTRAP_SERVERS=localhost:9092 \
             -e SPRING_KAFKA_CONSUMER_GROUP_ID=ringgo-group \
-            -e SERVER_BASE_URL=http://$PUBLIC_IP:8080 \
+            -e SERVER_BASE_URL=https://dev.ring-go.kr \
             -e OAUTH_KAKAO_CLIENT_ID="$KAKAO_CLIENT_ID" \
             -e OAUTH_KAKAO_CLIENT_SECRET="$KAKAO_CLIENT_SECRET" \
             -e OAUTH_NAVER_CLIENT_ID="$NAVER_CLIENT_ID" \
@@ -290,7 +282,7 @@ resource "aws_instance" "app_server" {
                   cat > /etc/nginx/conf.d/temp.conf << 'TEMP_EOF'
       server {
           listen 80;
-          server_name api.ring-go.kr docs.ring-go.kr www.ring-go.kr;
+          server_name dev.ring-go.kr www.ring-go.kr ring-go.kr;
 
           location /.well-known/acme-challenge/ {
               root /var/www/html;
@@ -315,21 +307,22 @@ resource "aws_instance" "app_server" {
                   mkdir -p /var/www/html
 
                   echo "SSL 인증서 발급 시도..."
-                  if certbot --nginx -d api.ring-go.kr -d docs.ring-go.kr -d www.ring-go.kr --non-interactive --agree-tos --email wjsgmlwls97@gmail.com --redirect; then
+                  if certbot --nginx -d dev.ring-go.kr -d www.ring-go.kr -d ring-go.kr --non-interactive --agree-tos --email wjsgmlwls97@gmail.com --redirect; then
                       echo "✅ SSL 인증서 발급 성공"
 
-                      # 도메인별 맞춤 설정 적용
+                      # 심플한 개발 서버 설정 적용
                       cat > /etc/nginx/conf.d/temp.conf << 'FINAL_EOF'
-      # API 서버
+      # 개발 서버 (API + Swagger 통합)
       server {
           listen 443 ssl;
-          server_name api.ring-go.kr;
+          server_name dev.ring-go.kr;
 
-          ssl_certificate /etc/letsencrypt/live/api.ring-go.kr/fullchain.pem;
-          ssl_certificate_key /etc/letsencrypt/live/api.ring-go.kr/privkey.pem;
+          ssl_certificate /etc/letsencrypt/live/dev.ring-go.kr/fullchain.pem;
+          ssl_certificate_key /etc/letsencrypt/live/dev.ring-go.kr/privkey.pem;
           include /etc/letsencrypt/options-ssl-nginx.conf;
           ssl_dhparam /etc/letsencrypt/ssl-dhparams.pem;
 
+          # 모든 요청을 Spring Boot로 프록시
           location / {
               proxy_pass http://127.0.0.1:8080;
               proxy_set_header Host $host;
@@ -337,111 +330,53 @@ resource "aws_instance" "app_server" {
               proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
               proxy_set_header X-Forwarded-Proto $scheme;
               proxy_set_header X-Forwarded-Host $host;
+              
+              # 타임아웃 설정
+              proxy_connect_timeout 30s;
+              proxy_send_timeout 30s;
+              proxy_read_timeout 30s;
+              
+              # WebSocket 지원 (향후 필요시)
+              proxy_http_version 1.1;
+              proxy_set_header Upgrade $http_upgrade;
+              proxy_set_header Connection "upgrade";
           }
-      }
-
-      # Swagger 문서 서버
-      server {
-          listen 443 ssl;
-          server_name docs.ring-go.kr;
-          ssl_certificate /etc/letsencrypt/live/api.ring-go.kr/fullchain.pem;
-          ssl_certificate_key /etc/letsencrypt/live/api.ring-go.kr/privkey.pem;
-          include /etc/letsencrypt/options-ssl-nginx.conf;
-          ssl_dhparam /etc/letsencrypt/ssl-dhparams.pem;
-          # /api/ → /api 리다이렉트
-          location = /api/ {
-              return 301 https://$server_name/api;
-          }
-          # /api 메인 경로 - Swagger UI 제공
-          location = /api {
-              proxy_pass http://127.0.0.1:8080/swagger-ui/index.html;
-              proxy_set_header Host $host;
-              proxy_set_header X-Real-IP $remote_addr;
-              proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-              proxy_set_header X-Forwarded-Proto $scheme;
-              proxy_set_header X-Forwarded-Host $host;
-          }
-          # Swagger UI 리소스들이 /api/ 하위에서 요청될 때 처리
-          location ~ ^/api/(.+)$ {
-              proxy_pass http://127.0.0.1:8080/swagger-ui/$1;
-              proxy_set_header Host $host;
-              proxy_set_header X-Real-IP $remote_addr;
-              proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-              proxy_set_header X-Forwarded-Proto $scheme;
-              proxy_set_header X-Forwarded-Host $host;
-          }
-          # Swagger UI 직접 경로
-          location /swagger-ui/ {
-              proxy_pass http://127.0.0.1:8080/swagger-ui/;
-              proxy_set_header Host $host;
-              proxy_set_header X-Real-IP $remote_addr;
-              proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-              proxy_set_header X-Forwarded-Proto $scheme;
-              proxy_set_header X-Forwarded-Host $host;
-          }
-          # 웹 리소스들
-          location /webjars/ {
-              proxy_pass http://127.0.0.1:8080/webjars/;
-              proxy_set_header Host $host;
-              proxy_set_header X-Real-IP $remote_addr;
-              proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-              proxy_set_header X-Forwarded-Proto $scheme;
-              proxy_set_header X-Forwarded-Host $host;
-          }
-          # API 스펙 JSON
-          location /v3/ {
-              proxy_pass http://127.0.0.1:8080/v3/;
-              proxy_set_header Host $host;
-              proxy_set_header X-Real-IP $remote_addr;
-              proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-              proxy_set_header X-Forwarded-Proto $scheme;
-              proxy_set_header X-Forwarded-Host $host;
-          }
-          # 루트 경로
-          location = / {
-              return 200 "Ring-Go Documentation\\n\\nAPI Documentation: /api";
+          
+          # 헬스체크용 (로드밸런서에서 사용)
+          location /health {
+              access_log off;
+              return 200 "healthy\\n";
               add_header Content-Type text/plain;
           }
-          # 기타 모든 요청
-          location / {
-              proxy_pass http://127.0.0.1:8080;
-              proxy_set_header Host $host;
-              proxy_set_header X-Real-IP $remote_addr;
-              proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-              proxy_set_header X-Forwarded-Proto $scheme;
-              proxy_set_header X-Forwarded-Host $host;
-          }
       }
 
-      # 메인 웹사이트
+      # 메인 도메인은 개발 서버로 리다이렉트
       server {
           listen 443 ssl;
-          server_name www.ring-go.kr;
+          server_name www.ring-go.kr ring-go.kr;
 
-          ssl_certificate /etc/letsencrypt/live/api.ring-go.kr/fullchain.pem;
-          ssl_certificate_key /etc/letsencrypt/live/api.ring-go.kr/privkey.pem;
+          ssl_certificate /etc/letsencrypt/live/dev.ring-go.kr/fullchain.pem;
+          ssl_certificate_key /etc/letsencrypt/live/dev.ring-go.kr/privkey.pem;
           include /etc/letsencrypt/options-ssl-nginx.conf;
           ssl_dhparam /etc/letsencrypt/ssl-dhparams.pem;
 
           location / {
-              return 301 https://docs.ring-go.kr;
+              return 301 https://dev.ring-go.kr$request_uri;
           }
       }
 
       # HTTP to HTTPS 리다이렉트
       server {
-          if ($host = www.ring-go.kr) {
-              return 301 https://$host$request_uri;
-          }
-          if ($host = docs.ring-go.kr) {
-              return 301 https://$host$request_uri;
-          }
-          if ($host = api.ring-go.kr) {
-              return 301 https://$host$request_uri;
-          }
           listen 80;
-          server_name api.ring-go.kr docs.ring-go.kr www.ring-go.kr;
-          return 404;
+          server_name dev.ring-go.kr www.ring-go.kr ring-go.kr;
+          
+          location /.well-known/acme-challenge/ {
+              root /var/www/html;
+          }
+          
+          location / {
+              return 301 https://$host$request_uri;
+          }
       }
       FINAL_EOF
 
