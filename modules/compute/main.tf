@@ -189,21 +189,18 @@ resource "aws_instance" "app_server" {
       # 함수: Parameter Store에서 안전하게 값 가져오기
       get_parameter() {
           local param_name="$1"
-          local description="$2"
-          echo "$description 가져오는 중..."
           local value=$(timeout 30 aws ssm get-parameter --name "$param_name" --with-decryption --query "Parameter.Value" --output text 2>/dev/null || echo "FAILED")
-          echo "$description: $([ "$value" != "FAILED" ] && echo "OK" || echo "FAILED")"
           echo "$value"
       }
 
-      MYSQL_PASSWORD=$(get_parameter "/ringgo/mysql/root-password" "MySQL 패스워드")
-      JWT_SECRET=$(get_parameter "/ringgo/jwt/secret" "JWT Secret")
-      KAKAO_CLIENT_ID=$(get_parameter "/ringgo/oauth/kakao/client-id" "카카오 Client ID")
-      KAKAO_CLIENT_SECRET=$(get_parameter "/ringgo/oauth/kakao/client-secret" "카카오 Client Secret")
-      NAVER_CLIENT_ID=$(get_parameter "/ringgo/oauth/naver/client-id" "네이버 Client ID")
-      NAVER_CLIENT_SECRET=$(get_parameter "/ringgo/oauth/naver/client-secret" "네이버 Client Secret")
-      GOOGLE_CLIENT_ID=$(get_parameter "/ringgo/oauth/google/client-id" "구글 Client ID")
-      GOOGLE_CLIENT_SECRET=$(get_parameter "/ringgo/oauth/google/client-secret" "구글 Client Secret")
+      MYSQL_PASSWORD=$(get_parameter "/ringgo/mysql/root-password")
+      JWT_SECRET=$(get_parameter "/ringgo/jwt/secret")
+      KAKAO_CLIENT_ID=$(get_parameter "/ringgo/oauth/kakao/client-id")
+      KAKAO_CLIENT_SECRET=$(get_parameter "/ringgo/oauth/kakao/client-secret")
+      NAVER_CLIENT_ID=$(get_parameter "/ringgo/oauth/naver/client-id")
+      NAVER_CLIENT_SECRET=$(get_parameter "/ringgo/oauth/naver/client-secret")
+      GOOGLE_CLIENT_ID=$(get_parameter "/ringgo/oauth/google/client-id")
+      GOOGLE_CLIENT_SECRET=$(get_parameter "/ringgo/oauth/google/client-secret")
 
       # 퍼블릭 IP 가져오기
       echo "퍼블릭 IP 가져오는 중..."
@@ -211,8 +208,8 @@ resource "aws_instance" "app_server" {
 
       echo "=== 설정 확인 ==="
       echo "DB 연결 가능: $DB_REACHABLE"
-      echo "MySQL 패스워드: $([ "$MYSQL_PASSWORD" != "FAILED" ] && echo "OK" || echo "FAILED")"
-      echo "JWT Secret: $([ "$JWT_SECRET" != "FAILED" ] && echo "OK" || echo "FAILED")"
+      echo "MySQL 패스워드: $([ "$MYSQL_PASSWORD" != "FAILED" ] && [ -n "$MYSQL_PASSWORD" ] && echo "OK" || echo "FAILED")"
+      echo "JWT Secret: $([ "$JWT_SECRET" != "FAILED" ] && [ -n "$JWT_SECRET" ] && echo "OK" || echo "FAILED")"
       echo "Public IP: $PUBLIC_IP"
       echo "Nginx 설치 상태: $NGINX_INSTALLED"
 
